@@ -1,8 +1,23 @@
 # CHANGELOG
 
-## [Untagged]
+## [Untagged]
 
 No date
+
+## [0.18.0]
+
+10.03.2021
+
+- Add `--check-power` option. Set this to check for AC power. Also `--power-wait-limit` sets a time limit to wait for power (default is 60 seconds).
+- Merge in upstream changes to `installinstallmacos.py`. This improves download resumption.
+
+## [0.17.4]
+
+03.03.2021
+
+- Default minimum drive space now set to 45GB, but can now be overridden with the `--min-drive-space NN` option.
+- Fixed the `--confirm` option.
+- Improved the `--help` output with more recent keys.
 
 ## [0.17.3]
 
@@ -258,6 +273,8 @@ Thanks to '@ahousseini' for various contributions to this release
 - Initial version. Expects a manual choice of installer from `installinstallmacos.py`.
 
 [untagged]: https://github.com/grahampugh/erase-install/compare/v0.16.1...HEAD
+[0.17.4]: https://github.com/grahampugh/erase-install/compare/v0.17.3...v0.17.4
+[0.17.3]: https://github.com/grahampugh/erase-install/compare/v0.17.2...v0.17.3
 [0.17.2]: https://github.com/grahampugh/erase-install/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/grahampugh/erase-install/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/grahampugh/erase-install/compare/v0.16.1...v0.17.0

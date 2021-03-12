@@ -14,9 +14,15 @@
 # Requirements:
 # macOS 10.13.4+ is already installed on the device (for eraseinstall option)
 # Device file system is APFS
-#
+
+# shellcheck disable=SC2034
+# this is due to the dynamic variable assignments used in the localization strings
+# shellcheck disable=SC2001
+# this is to use sed in the case statements
+
+
 # Version:
-version="0.17.3"
+version="0.18.0"
 
 # URL for downloading installinstallmacos.py
 installinstallmacos_url="https://raw.githubusercontent.com/grahampugh/macadmin-scripts/master/installinstallmacos.py"
@@ -62,8 +68,13 @@ if [[ -f "$jamfHelper" ]]; then
     jh_confirmation_cancel_button_en="Cancel"
     jh_confirmation_cancel_button_de="Abbrechen"
     # Jamf Helper localizations - free space check
-    jh_check_desc_en="The macOS upgrade cannot be installed on a computer with less than 30GB disk space."
-    jh_check_desc_de="Die Installation von macOS ist auf einem Computer mit weniger als 30GB freien Festplattenspeicher nicht möglich."
+    jh_check_desc_en="The macOS upgrade cannot be installed as there is not enough space left on the drive."
+    jh_check_desc_de="Das macOS-Upgrade kann nicht installiert werden, da nicht genügend Speicherplatz auf dem Laufwerk vorhanden ist."
+    # Jamf Helper localizations - power check
+    jh_power_title_en="Waiting for AC Power Connection"
+    jh_power_desc_en="Please connect your computer to power using an AC power adapter. This process will continue once AC power is detected."
+    jh_power_title_de="Warten auf AC-Netzteil"
+    jh_power_desc_de="Bitte schließen Sie Ihren Computer mit einem AC-Netzteil an das Stromnetz an. Dieser Prozess wird fortgesetzt, sobald die AC-Stromversorgung erkannt wird."
 
     # Jamf Helper icon for download window
     jh_dl_icon="/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/SidebarDownloadsFolder.icns"
@@ -93,61 +104,9 @@ if [[ -f "$jamfHelper" ]]; then
     jh_confirmation_button=jh_confirmation_button_${user_language}
     jh_confirmation_cancel_button=jh_confirmation_cancel_button_${user_language}
     jh_check_desc=jh_check_desc_${user_language}
+    jh_power_desc=jh_power_desc_${user_language}
+    jh_power_title=jh_power_title_${user_language}
 fi
-
-# Functions
-show_help() {
-    echo "
-    [erase-install] by @GrahamRPugh
-
-    Usage:
-    [sudo] ./erase-install.sh [--list] [--samebuild] [--sameos] [--move] [--path=/path/to]
-                [--build=XYZ] [--overwrite] [--os=X.Y] [--version=X.Y.Z] [--beta]
-                [--fetch-full-installer] [--erase] [--reinstall]
-
-    [no flags]        Finds latest current production, non-forked version
-                      of macOS, downloads it.
-    --seedprogram=... Select a non-standard seed program
-    --catalogurl=...  Select a non-standard catalog URL (overrides seedprogram)
-    --samebuild       Finds the build of macOS that matches the
-                      existing system version, downloads it.
-    --sameos          Finds the version of macOS that matches the
-                      existing system version, downloads it.
-    --os=X.Y          Finds a specific inputted OS version of macOS if available
-                      and downloads it if so. Will choose the latest matching build.
-    --version=X.Y.Z   Finds a specific inputted minor version of macOS if available
-                      and downloads it if so. Will choose the latest matching build.
-    --build=XYZ       Finds a specific inputted build of macOS if available
-                      and downloads it if so.
-    --move            If not erasing, moves the
-                      downloaded macOS installer to $installer_directory
-    --path=/path/to   Overrides the destination of --move to a specified directory
-    --erase           After download, erases the current system
-                      and reinstalls macOS
-    --confirm         Displays a confirmation dialog prior to erasing the current
-                      system and reinstalling macOS. Only applicable with
-                      --erase argument.
-    --reinstall       After download, reinstalls macOS without erasing the
-                      current system
-    --overwrite       Download macOS installer even if an installer
-                      already exists in $installer_directory
-    --list            List available updates only (don't download anything)
-    --extras=/path/to Overrides the path to search for extra packages
-    --beta            Include beta versions in the search. Works with the no-flag
-                      (i.e. automatic), --os and --version arguments.
-    --fetch-full-installer
-                      For compatible computers (10.15+) obtain the installer using
-                      'softwareupdate --fetch-full-installer' method instead of
-                      using installinstallmacos.py
-
-    Note: If existing installer is found, this script will not check
-          to see if it matches the installed system version. It will
-          only check whether it is a valid installer. If you need to
-          ensure that the currently installed version of macOS is used
-          to wipe the device, use the --overwrite parameter.
-    "
-    exit
-}
 
 kill_process() {
     process="$1"
@@ -160,7 +119,7 @@ kill_process() {
 ask_for_shortname() {
     # required for Silicon Macs
     /usr/bin/osascript <<EOT
-        set nameentry to text returned of (display dialog "Please enter an administrator account name to start the reinstallation process" default answer "" buttons {"Enter", "Cancel"} default button 1 with icon 2)
+        set nameentry to text returned of (display dialog "Please enter an account name to start the reinstallation process" default answer "" buttons {"Enter", "Cancel"} default button 1 with icon 2)
 EOT
 }
 
@@ -228,7 +187,9 @@ get_user_details() {
     user_has_secure_token=0
     enabled_users=""
     while read -r line ; do
-        enabled_users+="$(echo $line | cut -d, -f1) "
+        # shellcheck disable=SC2086
+        enabled_users+="$(echo $line | cut -d, -f1) "  
+        # shellcheck disable=SC2086
         if [[ "$account_shortname" == "$(echo $line | cut -d, -f1)" ]]; then
             echo "   [get_user_details] $account_shortname has Secure Token"
             user_has_secure_token=1
@@ -248,10 +209,58 @@ get_user_details() {
     check_password "$account_shortname" "$account_password"
 }
 
+wait_for_power() {
+    process="$1"
+    ## Loop for "power_wait_timer" seconds until either AC Power is detected or the timer is up
+    echo "   [wait_for_power] Waiting for AC power..."
+    while [[ "$power_wait_timer" -gt 0 ]]; do
+        if /usr/bin/pmset -g ps | /usr/bin/grep "AC Power" > /dev/null ; then
+            echo "   [wait_for_power] OK - AC power detected"
+            kill_process "$process"
+            return
+        fi
+        sleep 1
+        ((power_wait_timer--))
+    done
+    kill_process "$process"
+    echo "   [wait_for_power] ERROR - No AC power detected, cannot continue."
+    exit 1
+}
+
+check_power_status() {
+    # Check if device is on battery or AC power
+    # If not, and our power_wait_timer is above 1, allow user to connect to power for specified time period
+    # Acknowledgements: https://github.com/kc9wwh/macOSUpgrade/blob/master/macOSUpgrade.sh
+
+    # set default wait time to 60 seconds
+    [[ ! $power_wait_timer ]] && power_wait_timer=60
+
+    if /usr/bin/pmset -g ps | /usr/bin/grep "AC Power" > /dev/null ; then
+        echo "   [check_power_status] OK - AC power detected"
+    else
+        echo "   [check_power_status] WARNING - No AC power detected"
+        if [[ "$power_wait_timer" -gt 0 ]]; then
+            if [[ -f "$jamfHelper" ]]; then
+                # use jamfHelper if possible
+                "$jamfHelper" -windowType "utility" -title "${!jh_power_title}" -description "${!jh_power_desc}" -alignDescription "left" -icon "$jh_confirmation_icon" &
+                wait_for_power "jamfHelper"
+            else
+                /usr/bin/osascript -e "display dialog \"Please connect your computer to power using an AC power adapter. This process will continue once AC power is detected.\" buttons {\"OK\"} default button \"OK\" with icon stop" &
+                wait_for_power "osascript"
+            fi
+        else
+            echo "   [check_power_status] ERROR - No AC power detected, cannot continue."
+            exit 1
+        fi
+    fi
+}
+
 free_space_check() {
     free_disk_space=$(df -Pk . | column -t | sed 1d | awk '{print $4}')
-
-    if [[ $free_disk_space -ge 30000000 ]]; then
+    
+    min_drive_bytes=$(( min_drive_space * 1000000 ))
+    echo $min_drive_bytes
+    if [[ $free_disk_space -ge $min_drive_bytes ]]; then
         echo "   [free_space_check] OK - $free_disk_space KB free disk space detected"
     else
         echo "   [free_space_check] ERROR - $free_disk_space KB free disk space detected"
@@ -426,7 +435,7 @@ find_extra_packages() {
 set_seedprogram() {
     if [[ $seedprogram ]]; then
         echo "   [set_seedprogram] $seedprogram seed program selected"
-        /System/Library/PrivateFrameworks/Seeding.framework/Versions/A/Resources/seedutil enroll $seedprogram >/dev/null
+        /System/Library/PrivateFrameworks/Seeding.framework/Versions/A/Resources/seedutil enroll "$seedprogram" >/dev/null
         # /usr/sbin/softwareupdate -l -a >/dev/null
     else
         echo "   [set_seedprogram] Standard seed program selected"
@@ -456,8 +465,10 @@ run_fetch_full_installer() {
     fi
     # now download the installer
     echo "   [run_fetch_full_installer] Running /usr/sbin/softwareupdate --fetch-full-installer $softwareupdate_args"
+    # shellcheck disable=SC2086
     /usr/sbin/softwareupdate --fetch-full-installer $softwareupdate_args
 
+    # shellcheck disable=SC2181
     if [[ $? == 0 ]]; then
         # Identify the installer
         if find /Applications -maxdepth 1 -name 'Install macOS*.app' -type d -print -quit 2>/dev/null ; then
@@ -608,6 +619,7 @@ run_installinstallmacos() {
     echo
     echo "   installinstallmacos.py $installinstallmacos_args"
 
+    # shellcheck disable=SC2086
     if ! python "$workdir/installinstallmacos.py" $installinstallmacos_args ; then
         echo "   [run_installinstallmacos] Error obtaining valid installer. Cannot continue."
         kill_process jamfHelper
@@ -641,11 +653,118 @@ run_installinstallmacos() {
     fi
 }
 
+# Functions
+show_help() {
+    echo "
+    [erase-install] by @GrahamRPugh
+
+    Common usage:
+    [sudo] ./erase-install.sh [--list]  [--overwrite] [--move] [--path /path/to]
+                [--build XYZ] [--os X.Y] [--version X.Y.Z] [--samebuild] [--sameos] 
+                [--update] [--beta] [--seedprogram ...] [--erase] [--reinstall]
+                [--test-run] [--current-user]
+
+    [no flags]          Finds latest current production, non-forked version
+                        of macOS, downloads it.
+    --force-curl        Force the download of installinstallmacos.py from GitHub every run
+                        regardless of whether there is already a copy on the system. 
+                        Ensures that you are using the latest version.
+    --no-curl           Prevents the download of installinstallmacos.py in case your 
+                        security team don't like it.
+    --list              List available updates only using installinstallmacos 
+                        (don't download anything)
+    --seedprogram ...   Select a non-standard seed program
+    --catalogurl ...    Select a non-standard catalog URL (overrides seedprogram)
+    --samebuild         Finds the build of macOS that matches the
+                        existing system version, downloads it.
+    --sameos            Finds the version of macOS that matches the
+                        existing system version, downloads it.
+    --os X.Y            Finds a specific inputted OS version of macOS if available
+                        and downloads it if so. Will choose the latest matching build.
+    --version X.Y.Z     Finds a specific inputted minor version of macOS if available
+                        and downloads it if so. Will choose the latest matching build.
+    --build XYZ         Finds a specific inputted build of macOS if available
+                        and downloads it if so.
+    --update            Checks that an existing installer on the system is still current, 
+                        if not, it will delete it and download the current installer.
+    --replace-invalid   Checks that an existing installer on the system is still valid
+                        i.e. would successfully build on this system. If not, deletes it
+                        and downloads the current installer.
+    --move              If not erasing, moves the
+                        downloaded macOS installer to $installer_directory
+    --path /path/to     Overrides the destination of --move to a specified directory
+    --erase             After download, erases the current system
+                        and reinstalls macOS
+    --confirm           Displays a confirmation dialog prior to erasing the current
+                        system and reinstalling macOS. Only applicable with
+                        --erase argument.
+    --reinstall         After download, reinstalls macOS without erasing the
+                        current system
+    --overwrite         Download macOS installer even if an installer
+                        already exists in $installer_directory
+    --extras /path/to   Overrides the path to search for extra packages
+    --beta              Include beta versions in the search. Works with the no-flag
+                        (i.e. automatic), --os and --version arguments.
+    --check-power       Checks for AC power if set.
+    --power-wait-limit NN
+                        Maximum seconds to wait for detection of AC power, if 
+                        --check-power is set. Default is 60.
+                      
+
+    Parameters for use with Apple Silicon Mac:
+      Note that startosinstall requires user authentication on AS Mac. The user 
+      must have a Secure Token. This script checks for the Secure Token of the 
+      supplied user. An osascript dialog is used to supply the password, so
+      this script cannot be run at the login window or from remote terminal.
+    --current-user      Authenticate startosinstall using the current user
+    --user XYZ          Supply a user with which to authenticate startosinstall
+
+    Experimental features for macOS 10.15+:
+    --list-full-installers
+                        List installers using 'softwareupdate --list-full-installers'
+    --fetch-full-installer
+                        For compatible computers (10.15+) obtain the installer using
+                        'softwareupdate --fetch-full-installer' method instead of
+                        using installinstallmacos.py
+
+    Experimental features for macOS 11+:
+    --pkg               Downloads a package installer rather than the installer app.
+                        Can be used with the --reinstall and --erase options.
+
+    Note: If existing installer is found, this script will not check
+          to see if it matches the installed system version. It will
+          only check whether it is a valid installer. If you need to
+          ensure that the currently installed version of macOS is used
+          to wipe the device, use one of the --overwrite, --update or 
+          --replace-invalid parameters.
+
+    Parameters useful in testing this script:
+    --test-run          Run through the script right to the end, but do not actually
+                        run the 'startosinstall' command. The command that would be 
+                        run is shown in stdout.
+    --no-fs             Replaces the full-screen jamfHelper window with a smaller dialog,
+                        so you can still access the desktop while the script runs.
+    --min-drive-space   override the default minimum space required for startosinstall
+                        to run (45 GB).
+    --pythonpath /path/to
+                        Supply a path to a different python binary.
+                        Only relevant if using a mode that involves installinstallmacos.py
+    --workdir /path/to  Supply an alternative working directory. The default is the same 
+                        directory in which erase-install.sh is saved.
+
+    "
+    exit
+}
+
+
 # Main body
 
 # Safety mechanism to prevent unwanted wipe while testing
 erase="no"
 reinstall="no"
+
+# default minimum drive space in GB
+min_drive_space=45
 
 while test $# -gt 0
 do
@@ -696,6 +815,17 @@ do
             ;;
         --test-run) test_run="yes"
             ;;
+        --check-power) 
+            check_power="yes"
+            ;;
+        --power-wait-limit) 
+            shift
+            power_wait_timer="$1"
+            ;;
+        --min-drive-space) 
+            shift
+            min_drive_space="$1"
+            ;;
         --seedprogram)
             shift
             seedprogram="$1"
@@ -732,32 +862,38 @@ do
             shift
             workdir="$1"
             ;;
+        --power-wait-limit*)
+            power_wait_timer=$(echo "$1" | sed -e 's|^[^=]*=||g')
+            ;;
+        --min-drive-space*)
+            min_drive_space=$(echo "$1" | sed -e 's|^[^=]*=||g')
+            ;;
         --seedprogram*)
-            seedprogram=$(echo $1 | sed -e 's|^[^=]*=||g')
+            seedprogram=$(echo "$1" | sed -e 's|^[^=]*=||g')
             ;;
         --catalogurl*)
-            catalogurl=$(echo $1 | sed -e 's|^[^=]*=||g')
+            catalogurl=$(echo "$1" | sed -e 's|^[^=]*=||g')
             ;;
         --path*)
-            installer_directory=$(echo $1 | sed -e 's|^[^=]*=||g')
+            installer_directory=$(echo "$1" | sed -e 's|^[^=]*=||g')
             ;;
         --pythonpath*)
-            python_path=$(echo $1 | sed -e 's|^[^=]*=||g')
+            python_path=$(echo "$1" | sed -e 's|^[^=]*=||g')
             ;;
         --extras*)
-            extras_directory=$(echo $1 | sed -e 's|^[^=]*=||g')
+            extras_directory=$(echo "$1" | sed -e 's|^[^=]*=||g')
             ;;
         --os*)
-            prechosen_os=$(echo $1 | sed -e 's|^[^=]*=||g')
+            prechosen_os=$(echo "$1" | sed -e 's|^[^=]*=||g')
             ;;
         --version*)
-            prechosen_version=$(echo $1 | sed -e 's|^[^=]*=||g')
+            prechosen_version=$(echo "$1" | sed -e 's|^[^=]*=||g')
             ;;
         --build*)
-            prechosen_build=$(echo $1 | sed -e 's|^[^=]*=||g')
+            prechosen_build=$(echo "$1" | sed -e 's|^[^=]*=||g')
             ;;
         --workdir*)
-            workdir=$(echo $1 | sed -e 's|^[^=]*=||g')
+            workdir=$(echo "$1" | sed -e 's|^[^=]*=||g')
             ;;
         -h|--help) show_help
             ;;
@@ -795,6 +931,12 @@ iim_downloaded=0
 # some cli options vary based on installer versions
 os_version=$( /usr/bin/defaults read "/System/Library/CoreServices/SystemVersion.plist" ProductVersion )
 os_minor_version=$( echo "$os_version" | sed 's|^10\.||' | sed 's|\..*||' )
+
+# check for power and drive space if invoking erase or reinstall options
+if [[ $erase == "yes" || $reinstall == "yes" ]]; then
+    free_space_check
+    [[ "$check_power" == "yes" ]] && check_power_status
+fi
 
 # Look for the installer, download it if it is not present
 echo "   [erase-install] Looking for existing installer"
@@ -902,20 +1044,17 @@ fi
 [[ $reinstall == "yes" ]] && echo "   [erase-install] WARNING! Running $install_macos_app with reinstall option"
 echo
 
-# check that there is enough disk space
-free_space_check
-
 # If configured to do so, display a confirmation window to the user. Note: default button is cancel
 if [[ $confirm == "yes" ]] && [[ -f "$jamfHelper" ]]; then
     if [[ $erase == "yes" ]]; then
-        confirmation=$("$jamfHelper" -windowType utility -title "${!jh_confirmation_title}" -alignHeading center -alignDescription natural -description "${!jh_confirmation_desc}" \
-            -lockHUD -icon "$jh_confirmation_icon" -button1 "${!jh_confirmation_cancel_button}" -button2 "${!jh_confirmation_button}" -defaultButton 1 -cancelButton 1 2> /dev/null)
-        buttonClicked="${confirmation:$i-1}"
+        "$jamfHelper" -windowType utility -title "${!jh_confirmation_title}" -alignHeading center -alignDescription natural -description "${!jh_confirmation_desc}" \
+            -lockHUD -icon "$jh_confirmation_icon" -button1 "${!jh_confirmation_cancel_button}" -button2 "${!jh_confirmation_button}" -defaultButton 1 -cancelButton 1 2> /dev/null
+        confirmation=$?
 
-        if [[ "$buttonClicked" == "0" ]]; then
+        if [[ "$confirmation" == "0"* ]]; then
             echo "   [erase-install] User DECLINED erase/install"
             exit 0
-        elif [[ "$buttonClicked" == "2" ]]; then
+        elif [[ "$confirmation" == "2"* ]]; then
             echo "   [erase-install] User CONFIRMED erase/install"
         else
             echo "   [erase-install] User FAILED to confirm erase/install"
@@ -990,6 +1129,7 @@ fi
 # run it!
 if [[ $test_run != "yes" ]]; then
     if [ "$arch" == "arm64" ]; then
+        # shellcheck disable=SC2086
         "$install_macos_app/Contents/Resources/startosinstall" "${install_args[@]}" --pidtosignal $PID --agreetolicense --nointeraction --stdinpass --user "$account_shortname" "${install_package_list[@]}" <<< $account_password
     else
         "$install_macos_app/Contents/Resources/startosinstall" "${install_args[@]}" --pidtosignal $PID --agreetolicense --nointeraction "${install_package_list[@]}"
